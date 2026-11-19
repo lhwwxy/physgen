@@ -1,0 +1,58 @@
+# PhysGen 配置文件
+# 所有真实后端的 API key 一律通过环境变量注入，勿写入本文件。
+
+# PhysGen 全局配置 —— 本文件是唯一需要客户按需修改的地方
+# - provider: 各模块选 mock（开箱即用）或真实后端
+# - model / base_url: 当前为示例值（换成你自己的网关与模型）
+# - api_key 引用 .env 里的变量；默认全部共用 PHYSGEN_API_KEY，
+#   各模块不是同一家供应商时，可分别引用不同变量（见 .env.example）
+planner:
+  provider: llm             # llm（语义解析）| mock（正则规则）
+  model: glm-5.3-flash      # 网关里的任意 LLM
+  base_url: https://your-gateway.example.com/v1
+  api_key: ${PHYSGEN_API_KEY}   # 密钥放 .env 或环境变量，绝不写进仓库
+simulator:
+  provider: genesis         # genesis | mock（genesis 缺失时自动降级 mock）
+generator:
+  provider: seedance        # seedance（OpenAI Videos 协议/官方Ark）| mock | kling | http_generic
+  model: doubao-seedance-2-5-260628
+  base_url: https://your-gateway.example.com/v1   # 中转网关；官方 Ark 则改为 https://ark.cn-beijing.volces.com/api/v3
+  api_key: ${PHYSGEN_API_KEY}   # 视频供应商与 LLM 不同家时改为如 ${PHYSGEN_VIDEO_API_KEY}
+  poll_interval_s: 10       # 真实后端轮询间隔
+  max_poll_time_s: 900      # 单段视频生成最长等待时间（秒）
+auditor:
+  provider: vlm             # vlm（画面级物理审查）| mock（数值真值比对注入演示异常）
+  model: glm-5.3-flash      # 需支持 image_input 的模型
+  base_url: https://your-gateway.example.com/v1
+  api_key: ${PHYSGEN_API_KEY}   # 审查模型供应商可单独配置（见 .env.example）
+repairer:
+  provider: seedance        # seedance（真实修复：段级重生成+帧级重绘）| mock | http_generic
+  model: doubao-seedance-2-5-260628        # 段级重生成用
+  image_model: doubao-seedream-5-0-pro     # 帧级重绘用（图生图）
+  base_url: https://your-gateway.example.com/v1
+  api_key: ${PHYSGEN_API_KEY}   # 密钥放 .env 或环境变量，绝不写进仓库
+
+# 物理审查阈值（超过即判定异常）
+thresholds:
+  dim_error_pct: 15.0       # 尺寸误差百分比
+  trajectory_rmse_m: 0.30   # 轨迹 RMSE（米）
+  fall_time_err_pct: 20.0   # 落地时长相对误差（对比 t=sqrt(2h/g)）
+  overlap_penetration: 0.05 # 物体间穿插体积比例
+
+# 预算控制
+budget:
+  repair_rounds_per_segment: 2   # 段级修复最多轮数
+  max_frame_repair_rounds: 3     # 全局阶段单帧修复最多轮数
+  frame_anomaly_seg_ratio: 0.5   # 段内异常帧占比超过此值 → 升级为整段重生成
+  max_frames_per_round: 4        # 全局阶段单轮最多重绘的帧数（费用控制）
+
+video:
+  fps: 24
+  segment_seconds: 4.0     # 每段时长（Seedance 2.5 支持 4-30s）
+  resolution: [1280, 720]
+  renderer: 3d             # 3d（matplotlib 透视渲染）| 2d（立面占位）
+
+# Mock 演示选项
+mock:
+  noise_seed: 42            # 视觉估计噪声种子（保证可复现）
+  inject_anomaly: true      # 人为注入一处异常，演示"审查→修复"路径

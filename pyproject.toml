@@ -1,0 +1,38 @@
+[project]
+name = "physgen"
+version = "0.1.0"
+description = "PhysGen — 物理一致性视频生成流水线（模拟→生成→审查→修复闭环）"
+requires-python = ">=3.9"
+# 基础安装仅含轻量依赖：Mock 流水线开箱即用
+dependencies = [
+    "pillow>=9.0",
+    "pyyaml>=6.0",
+    "typer>=0.9",
+    "rich>=13.0",
+    "requests>=2.28",
+]
+
+[project.optional-dependencies]
+# 真实后端依赖按需安装：pip install -e ".[real]"（或 physgen setup --install）
+# - matplotlib：Mock 模拟器的 3D 首帧渲染（缺失时自动降级 2D）
+# - genesis-world / torch：本地 3D 物理模拟（缺失时自动降级 MockSimulator）
+# - imageio[ffmpeg]：视频下载与抽帧（ffmpeg 二进制随包部署时获取，
+#   系统已装 ffmpeg 则优先使用系统的）
+real = [
+    "matplotlib>=3.7",
+    "genesis-world>=0.2.0",
+    "torch>=2.0",
+    "imageio[ffmpeg]>=2.30",
+]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+physgen = "cli:main"
+
+[tool.setuptools]
+packages = ["physgen", "physgen.planner", "physgen.simulator", "physgen.generator",
+            "physgen.auditor", "physgen.repairer", "physgen.orchestrator"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
