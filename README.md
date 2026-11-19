@@ -102,7 +102,3 @@ physgen report runs/demo
 ```bash
 pytest tests/ -v   # 30 项：流水线/审查/修复/密钥治理/配置约束
 ```
-
-## 设计文档
-
-详见 [`DESIGN.md`](../DESIGN.md)。
