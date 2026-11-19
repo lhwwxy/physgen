@@ -1,88 +1,108 @@
 # PhysGen — 物理一致性视频生成流水线
 
-针对视频生成模型物理规则缺失（尺寸失真、"重物轻放"等）的闭环工具：
-**规划 → 模拟 → 生成 → 物理审查 → 修复 → 全局逐帧审查/修复**。
+针对视频生成模型物理规则缺失问题的闭环工具。直接生成的视频常出现**尺寸失真、重物轻放、物体穿模、悬浮失重**等物理错误——PhysGen 用"真实物理模拟 + 画面级审查 + 自动修复"来兜底：
 
-详见 `../DESIGN.md`（设计方案）。当前进度：**M1（全 Mock）+ M2（Genesis + Seedance 真实生成）+ M3（LLM 规划 + VLM 审查）+ M4（真实重绘修复）全部完成**，全真实后端端到端验收通过。
-
-真实后端全链路：**LLM 语义规划（glm-5.3-flash）→ Genesis 物理模拟/渲染 → Seedance 图生视频（doubao-seedance-2-5-260628）→ VLM 画面级物理审查（尺寸失真/穿模/重量感/冲击合理性）→ 真实修复（Seedance 带修复约束整段重生成 + Seedream 逐帧图生图重绘）→ 全局逐帧审查修复**。
-
-## 部署与快速开始
-
-### 安装（依赖全部在部署阶段下载，工具本身轻量）
-
-```bash
-cd physgen
-python3.12 -m venv .venv312 && source .venv312/bin/activate
-
-# 1. 基础安装（仅 ~10MB：Mock 流水线开箱即用，无需任何 API key）
-pip install -e ".[dev]"
-
-# 2. 部署体检：检查 Python 版本 / 依赖 / ffmpeg / 密钥 / 配置
-physgen setup            # 只体检，给出建议命令
-physgen setup --install  # 自动安装缺失的真实后端依赖（Genesis/torch/imageio 等）
-
-# 3. 配置密钥（仓库不含任何明文 key）
-cp .env.example .env && vi .env      # 填入你的 PHYSGEN_API_KEY
-# 也可以直接用环境变量：export PHYSGEN_API_KEY=sk-xxx
+```
+用户需求 → LLM 语义规划 → 物理模拟 → 视频生成 → VLM 物理审查 → 自动修复 → 逐帧复审 → 成片
 ```
 
-### 依赖分层说明
+## 它能做什么
 
-| 层 | 内容 | 何时安装 |
+| 环节 | 实现 | 实测效果 |
 |---|---|---|
-| 基础 | pillow/pyyaml/typer/rich/requests | `pip install -e .`（Mock 流水线即可跑） |
-| `real` extra | matplotlib / genesis-world / torch / imageio+ffmpeg | `pip install -e ".[real]"` 或 `physgen setup --install`；缺失时各模块自动降级 Mock/2D |
+| **语义规划** | LLM 解析中文需求为结构化场景（物体/尺寸/材质/事件），确定性代码兜底质量计算与合法性校验 | "20×10×12m 办公楼超地块"被自动缩到合法值 |
+| **物理模拟** | Genesis 真实 3D 物理引擎：首帧渲染、控制信号、逐帧物理真值（GT） | 首帧含 1.7m 人物比例参照 |
+| **视频生成** | Seedance 图生视频（OpenAI Videos 协议，官方 Ark 与兼容网关均可） | 720p / 4s 每段 |
+| **物理审查** | VLM 抽帧 + GT 期望值对比，画面级违规检出 | 真实检出：尺寸失真 2 倍、物体嵌墙、动能量化推理（"200kJ 不足以产生爆炸式抛射"） |
+| **自动修复** | 段级：带 VLM 修复建议整段重生成；帧级：图像编辑模型逐帧重绘 | 端到端验收：修复后审查全过/仅剩个别项 |
 
-> ffmpeg 无需手动安装：系统有就用系统的，没有则 imageio-ffmpeg 在首次抽帧时自动获取。
+修复预算可配（轮数/帧数封顶），预算耗尽按设计降级接受并在报告中标注。
 
-### 运行
+## 安装
 
 ```bash
-# 真实后端全链路（一个 key 复用于规划/生成/审查/修复，模型名全部来自 config.yaml）
-physgen run "一块10×10米的土地上盖一间8×6×3米的房子，旁边放一个2×2×1米的石块" --out runs/real
-# 每段：LLM 规划 → Genesis 模拟首帧+GT → Seedance 图生视频（720p/4s）
-#       → VLM 画面级物理审查 → 真实修复（重生成/重绘）→ 全局逐帧审查修复
+git clone https://github.com/lhwwxy/physgen.git && cd physgen
+python3 -m venv .venv && source .venv/bin/activate
 
-# 纯 Mock demo（无需任何 API key）
-# 将 config.yaml 中各模块 provider 改为 mock
+# 基础安装（轻量，Mock 流水线开箱即用，无需任何 API key）
+pip install -e .
+
+# 部署体检：检查 Python/依赖/ffmpeg/密钥/配置，可自动安装真实后端依赖
+physgen setup            # 只体检，给出建议命令
+physgen setup --install  # 自动安装 Genesis/torch/imageio 等（或手动 pip install -e ".[real]"）
 ```
 
-### 配置约定
+依赖按需下载，不捆绑：基础层仅 ~10MB；Genesis/torch 等重依赖装在 `real` extra，缺失时各模块自动降级 Mock/2D。ffmpeg 无需手动装（imageio-ffmpeg 首次抽帧时自动获取）。
 
-- **模型名**：`config.yaml` 各段的 `model` 字段是唯一来源（`glm-5.3-flash` / `doubao-seedance-2-5-260628` 等只是当前配置值，换成你自己的即可）；代码不内置任何模型 id，真实 provider 缺配置会直接报错指路
-- **密钥**：`config.yaml` 只含 `${PHYSGEN_API_KEY}` 占位引用；实际密钥放在 `.env`（已被 `.gitignore` 排除）。优先级：shell 环境变量 > `.env`。checkpoint 快照（`runs/*/state.json`）已脱敏，不含密钥
-- **端点**：各段 `base_url` **必填**（OpenAI 兼容网关或官方 API，如 Ark: `https://ark.cn-beijing.volces.com/api/v3`）；代码不内置任何端点，未配置会直接报错，`physgen setup` 也会体检此项
+## 配置
+
+只需两个文件：
+
+**1. `.env`** —— 唯一密钥文件（不入库）：
+
+```bash
+cp .env.example .env
+# 填入你的 key；所有模块默认共用：
+PHYSGEN_API_KEY=sk-xxx
+```
+
+**2. `config.yaml`** —— 所有可调参数（provider 选 mock/真实后端、模型名、端点、审查阈值、修复预算、时长分辨率等）：
+
+```yaml
+planner:   { provider: llm,      model: <任意 LLM>,           base_url: <OpenAI 兼容端点>, api_key: ${PHYSGEN_API_KEY} }
+simulator: { provider: genesis }                                # 本地物理引擎，无需 key
+generator: { provider: seedance, model: <视频模型>,           base_url: ..., api_key: ${PHYSGEN_API_KEY} }
+auditor:   { provider: vlm,      model: <支持 image_input>,   base_url: ..., api_key: ${PHYSGEN_API_KEY} }
+repairer:  { provider: seedance, model: ..., image_model: <图像编辑模型>, base_url: ..., api_key: ${PHYSGEN_API_KEY} }
+```
+
+- **最小配置**：一个 key + 各模块一行 `model` + `base_url`；全部改 `mock` 则零配置运行
+- **多供应商**：LLM/VLM 与视频生成不是同一家时，各模块 `api_key` 引用不同变量（见 `.env.example`）
+- 代码不内置任何模型 id 和端点，缺配置会直接报错指路；`physgen setup` 也会逐项体检
+
+## 使用
+
+```bash
+# 全链路运行（真实后端）
+physgen run "一块10×10米的土地上盖一间8×6×3米的房子，旁边放一个2×2×1米的石块" --out runs/demo
+
+# 长需求自动分段，支持断点续跑（不重复调用已完成的生成步骤）
+physgen resume runs/demo
+
+# 重新渲染审查报告
+physgen report runs/demo
+```
 
 产出（`runs/<run_id>/`）：
-- `report.html` — 审查报告：逐段检查项、异常清单、修复记录、全局逐帧审查结果
-- `seg_XX/first_frame.png` — 模拟器渲染的首帧（含 1.7m 人物比例参照）
-- `seg_XX/frame_*.png / clip.mp4` — 生成视频（无 ffmpeg 时仅帧序列）
-- `final/` — 全局修复后的成片
-- `state.json` — checkpoint，支持 `physgen resume runs/<run_id>` 断点续跑
+
+| 文件 | 内容 |
+|---|---|
+| `report.html` | 审查报告：逐段检查项、异常清单（含物理量化推理）、修复记录、全局逐帧复审 |
+| `seg_XX/first_frame.png` | 模拟器渲染的首帧 |
+| `seg_XX/clip.mp4` | 生成/修复后的视频段 |
+| `final/` | 全局修复后的成片 |
+| `state.json` | checkpoint（已脱敏，不含密钥） |
 
 ## 架构
 
-五个模块全部面向接口，`config.yaml` 选择实现，API key 走环境变量：
+五个模块全部面向接口，`config.yaml` 逐模块选择实现，可独立替换：
 
-| 模块 | 职责 | Mock（已实现） | 真实后端 |
+| 模块 | 职责 | Mock | 真实后端 |
 |---|---|---|---|
-| planner | 需求 → SceneSpec（含物理合法性校验/自动修正） | 正则+规则引擎 | **`llm` 已交付**（语义解析；质量/摆放/校验仍由确定性代码兜底） |
-| simulator | 首帧渲染 + 控制信号 + 物理真值 GT | 参数化模拟 | **`genesis` 已交付**（真实 3D 物理 + Rasterizer 渲染） |
-| generator | 首帧 → 视频段 | 确定性扰动占位视频 | **`seedance` 已交付**（doubao-seedance-2-5-260628，OpenAI Videos 协议，官方 Ark 同适配） |
-| auditor | 尺寸/轨迹/落地时长/重量感审查 | 数值真值比对 | **`vlm` 已交付**（抽帧+GT 期望对比，画面级违规检出） |
-| repairer | 段级 + 帧级修复 | 标记式修复 | **`seedance` 已交付**（段级 Seedance 重生成 + 帧级 Seedream 图生图重绘；失败自动保留原帧） |
+| planner | 需求 → SceneSpec（校验/自动修正） | 正则+规则 | `llm`（语义解析） |
+| simulator | 首帧渲染 + 控制信号 + 物理真值 GT | 参数化模拟 | `genesis`（3D 物理） |
+| generator | 首帧 → 视频段 | 占位视频 | `seedance` / `kling` / `http_generic` |
+| auditor | 尺寸/轨迹/落地时长/重量感审查 | 数值比对 | `vlm`（画面级） |
+| repairer | 段级重生成 + 帧级重绘 | 标记式修复 | `seedance`（重生成）+ 图像编辑（重绘） |
+
+任一真实后端不可用时自动降级 Mock，流水线不中断。
 
 ## 测试
 
 ```bash
-pytest tests/ -v
+pytest tests/ -v   # 30 项：流水线/审查/修复/密钥治理/配置约束
 ```
 
-## 里程碑
+## 设计文档
 
-- [x] M1 全 Mock 端到端流水线 + CLI + checkpoint + HTML 报告
-- [ ] M2 Genesis 模拟器（真实 3D 首帧与 GT）
-- [ ] M3 LLM 规划器 + VLM 审查器
-- [ ] M4 可灵/通用 HTTP 生成与重绘适配器
-- [ ] M5 全局审查/修复完善
+详见 [`DESIGN.md`](../DESIGN.md)。
