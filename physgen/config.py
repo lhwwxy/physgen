@@ -59,6 +59,12 @@ class ProviderCfg:
 
 
 @dataclass
+class AuditCfg:
+    """audit 模式（外部视频质检）设置。"""
+    background_check: bool = True   # 通道②：画面物理一致性巡检（背景物体间冲突等）
+
+
+@dataclass
 class AppConfig:
     planner: ProviderCfg
     simulator: ProviderCfg
@@ -69,6 +75,7 @@ class AppConfig:
     budget: Budget
     video: VideoCfg
     mock: MockCfg
+    audit: AuditCfg = field(default_factory=AuditCfg)
 
     def api_key(self, module: str = "") -> Optional[str]:
         """统一密钥入口：config.yaml 之外，key 只认 PHYSGEN_API_KEY（.env / 环境变量）。
@@ -154,6 +161,9 @@ def load_config(path: Optional[str | Path] = None) -> AppConfig:
             noise_seed=int(m.get("noise_seed", 42)),
             inject_anomaly=bool(m.get("inject_anomaly", True)),
         ),
+        audit=AuditCfg(
+            background_check=bool(section("audit").get("background_check", True)),
+        ),
     )
 
 
@@ -194,6 +204,7 @@ def dump_config(cfg: "AppConfig | dict", path: str | Path) -> None:
         "budget": cfg.budget.__dict__,
         "video": cfg.video.__dict__,
         "mock": cfg.mock.__dict__,
+        "audit": cfg.audit.__dict__,
     }
     with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(d, f, allow_unicode=True, sort_keys=False)
@@ -212,4 +223,6 @@ def from_pipeline_dict(d: dict[str, Any]) -> AppConfig:
         video=VideoCfg(**{k: v for k, v in d.get("video", {}).items()
                           if k in VideoCfg.__dataclass_fields__}),
         mock=MockCfg(**d.get("mock", {})),
+        audit=AuditCfg(**{k: v for k, v in d.get("audit", {}).items()
+                          if k in AuditCfg.__dataclass_fields__}),
     )

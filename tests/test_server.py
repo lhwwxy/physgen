@@ -70,6 +70,25 @@ def test_auth_required_when_token_set(client, monkeypatch):
     assert ok.status_code == 202
 
 
+def test_audit_endpoint_with_frames_dir(client, tmp_path):
+    """POST /audit：帧目录输入 → audit 任务 → 报告产出。"""
+    from PIL import Image as PILImage
+    d = tmp_path / "frames"
+    d.mkdir()
+    for i in range(4):
+        PILImage.new("RGB", (320, 240), (50, 100, 150)).save(d / f"frame_{i:04d}.png")
+    r = client.post("/audit", json={"video": str(d),
+                                    "prompt": "一块4×4米的场地上放一个1×1×1米的石块",
+                                    "config": client.cfg_path})
+    assert r.status_code == 202
+    task_id = r.json()["task_id"]
+    assert r.json()["type"] == "audit"
+    s = _wait_done(client, task_id)
+    assert s["status"] == "done", s.get("error")
+    res = client.get(f"/tasks/{task_id}/result").json()
+    assert res["report_url"]
+
+
 def test_empty_prompt_rejected(client):
     assert client.post("/tasks", json={"prompt": "  ",
                                        "config": client.cfg_path}).status_code == 400

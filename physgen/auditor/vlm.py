@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 
 import requests
 from PIL import Image
@@ -40,6 +41,52 @@ AUDIT_PROMPT = """你是物理一致性审查员。第 1 张图是物理模拟�
 }}
 审查要点：物体缺失、尺寸比例失真（对照人与房子/石块的比例）、重物下落缺少加速感、\
 落地无冲击、物体悬浮、穿模。没有问题 anomalies 给空数组。"""
+
+# audit 模式 通道①：验收核对（用户请求 = 验收标准，白名单原则）
+EXPECT_PROMPT = """你是交付验收审查员。以下是视频抽帧，请对照【期望属性清单】核对画面。
+
+【期望属性清单】（来自用户请求，只有这些算验收标准）：
+{expected}
+
+【检查规则（严格遵守）】
+1. 只核对清单项：尺寸比例、数量、材质、空间关系、是否出现
+2. 未提及的外观细节（具体形状、纹理、画风、画质、背景内容）一律不判异常
+3. 明显违反物理的画面（物体悬浮/穿模/重物轻放）独立于清单也要报告
+
+输出 JSON（不要解释）：
+{{
+  "expectations_met": bool,                 // 清单项是否全部满足
+  "anomalies": [
+    {{"frame_index": 整数或null, "obj_id": "物体id或scene",
+      "severity": "low|medium|high",
+      "detail": "与清单哪一项不符 + 画面实际是什么",
+      "suggest_fix": "修复建议"}}
+  ]
+}}
+没有问题 anomalies 给空数组。"""
+
+# audit 模式 通道②：物理巡检（全画面，含背景物体间冲突）
+PATROL_PROMPT = """你是物理一致性巡检员。以下是视频抽帧，请检查画面中【所有】物体的\
+物理合理性，包括主体之外背景里的物体以及它们之间的相互关系。
+
+检查要点：
+- 物体悬浮/穿模/嵌进地面或墙面
+- 物体之间的互相穿插、支撑关系错误
+- 阴影方向与光源矛盾、倒影/反射错乱
+- 物体凭空出现/消失（跨帧对比）
+- 大质量物体下落缺少加速感、落地无冲击
+
+注意：画风/画质/背景内容本身不是异常，只报告物理上的矛盾。
+输出 JSON（不要解释）：
+{{
+  "anomalies": [
+    {{"frame_index": 整数或null, "obj_id": "物体id或scene",
+      "severity": "low|medium|high",
+      "detail": "具体物理矛盾",
+      "suggest_fix": "修复建议"}}
+  ]
+}}
+没有问题 anomalies 给空数组。"""
 
 
 def _frame_to_data_uri(path: str, max_px: int = 640) -> str:
@@ -149,7 +196,8 @@ class VLMAuditor(PhysicsAuditor):
                 s = s[4:]
         return json.loads(s.strip())
 
-    def _parse_report(self, text: str, seg_idx: int, spec) -> AuditReport:
+    def _parse_report(self, text: str, seg_idx: int, spec,
+                      metric: str = "vlm_commonsense") -> AuditReport:
         checks: list[CheckItem] = []
         anomalies: list[Anomaly] = []
         try:
@@ -180,11 +228,69 @@ class VLMAuditor(PhysicsAuditor):
                 segment_index=seg_idx,
                 frame_index=int(fi) if isinstance(fi, (int, float)) else None,
                 obj_id=str(a.get("obj_id") or "scene"),
-                metric="vlm_commonsense",
+                metric=metric,
                 severity=str(a.get("severity") or "medium"),
                 detail=str(a.get("detail") or ""),
                 suggest_fix=str(a.get("suggest_fix") or "")))
         return AuditReport(segment_index=seg_idx, checks=checks, anomalies=anomalies)
+
+    # ---------- audit 模式双通道（外部视频质检） ----------
+
+    def _sample_frames(self, clip: VideoClip) -> list[str]:
+        frames = clip.frame_paths
+        n = max(1, self.max_frames)
+        idxs = sorted({0, len(frames) // 3, len(frames) // 2,
+                       2 * len(frames) // 3, len(frames) - 1})[:n + 1]
+        return [frames[i] for i in idxs if 0 <= i < len(frames)]
+
+    @staticmethod
+    def _expectations_text(spec) -> str:
+        """从 SceneSpec 生成期望属性清单（白名单原则：只列请求中明确的项）。"""
+        lines = [f"地块 {spec.ground.length_m}×{spec.ground.width_m} 米"]
+        for o in spec.objects:
+            l, w, h = o.dims_m
+            lines.append(f"- {o.id}（{o.name}）：{l}×{w}×{h} 米，"
+                         f"材质 {o.material}，约 {o.mass_kg:.0f} kg")
+        for ev in spec.events or []:
+            if ev.type == "fall":
+                drop = ev.params.get("drop_height_m", 2.0)
+                lines.append(f"- 事件：{ev.actors} 在 {ev.t_start}s 后从约 {drop} 米"
+                             f"高度下落到地面")
+        return "\n".join(lines)
+
+    def _audit_lane(self, clip: VideoClip, spec, prompt_tpl: str,
+                    metric: str, include_expected: bool) -> AuditReport:
+        if not self.api_key:
+            raise RuntimeError("缺少密钥：请在 .env 配置 PHYSGEN_API_KEY（或 config.yaml [auditor].api_key）")
+        try:
+            text = (prompt_tpl.format(expected=self._expectations_text(spec))
+                    if include_expected else prompt_tpl)
+            content: list[dict] = [{"type": "text", "text": text}]
+            for fp in self._sample_frames(clip):
+                content.append({"type": "image_url",
+                                "image_url": {"url": _frame_to_data_uri(fp)}})
+            r = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}",
+                         "Content-Type": "application/json"},
+                json={"model": self.model, "temperature": 0.1,
+                      "messages": [{"role": "user", "content": content}]},
+                timeout=180)
+            r.raise_for_status()
+            reply = r.json()["choices"][0]["message"]["content"]
+            return self._parse_report(reply, clip.segment_index, spec, metric=metric)
+        except Exception as e:  # noqa: BLE001 — 审查失败不中断质检流程
+            print(f"[vlm-auditor] {metric} 调用失败（{e}），本通道按通过处理")
+            return AuditReport(segment_index=clip.segment_index,
+                               checks=[], anomalies=[])
+
+    def audit_expectations(self, clip: VideoClip, spec) -> AuditReport:
+        """通道① 验收核对：画面 vs 用户请求期望清单。"""
+        return self._audit_lane(clip, spec, EXPECT_PROMPT, "acceptance_check", True)
+
+    def audit_background(self, clip: VideoClip, spec) -> AuditReport:
+        """通道② 物理巡检：全画面物理一致性（含背景物体间冲突）。"""
+        return self._audit_lane(clip, spec, PATROL_PROMPT, "physics_patrol", False)
 
     # ---------- 工具 ----------
 

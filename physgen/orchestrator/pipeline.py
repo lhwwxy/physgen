@@ -246,7 +246,7 @@ class Pipeline:
             "generator": asdict(cfg.generator), "auditor": asdict(cfg.auditor),
             "repairer": asdict(cfg.repairer), "thresholds": asdict(cfg.thresholds),
             "budget": asdict(cfg.budget), "video": {"fps": cfg.video.fps},
-            "mock": asdict(cfg.mock),
+            "mock": asdict(cfg.mock), "audit": asdict(cfg.audit),
         }
         # 快照脱敏：密钥不落盘（resume 时从环境变量还原）
         for m in ("planner", "simulator", "generator", "auditor", "repairer"):

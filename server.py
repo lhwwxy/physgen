@@ -4,6 +4,7 @@ from __future__ import annotations
 
 核心流水线零改动，本模块只提供：
 - POST /tasks            提交生成任务（异步，立即返回 task_id）
+- POST /audit            外部视频质检（双通道审查+优先级修复，平台对接模式）
 - GET  /tasks            任务列表
 - GET  /tasks/{id}       任务状态与进度（来自 checkpoint：phase/段进度）
 - POST /tasks/{id}/resume 断点续跑失败/中断的任务
@@ -100,16 +101,20 @@ def _execute(task_id: str, resume: bool) -> None:
         t = _tasks[task_id]
     try:
         from physgen.config import load_config
-        from physgen.orchestrator import Pipeline
         from physgen.types import UserRequest
 
         cfg = load_config(t["config"])
-        pipeline = Pipeline(cfg, t["run_dir"])
-        if resume:
-            pipeline.resume(t["run_dir"])
+        if t.get("type") == "audit":
+            from physgen.orchestrator.audit_only import AuditPipeline
+            AuditPipeline(cfg, t["run_dir"]).run(t["video"], t["prompt"])
         else:
-            pipeline.run(UserRequest(text=t["prompt"],
-                                     duration_s=t.get("duration_s")))
+            from physgen.orchestrator import Pipeline
+            pipeline = Pipeline(cfg, t["run_dir"])
+            if resume:
+                pipeline.resume(t["run_dir"])
+            else:
+                pipeline.run(UserRequest(text=t["prompt"],
+                                         duration_s=t.get("duration_s")))
         t["status"] = "done"
     except Exception as e:  # noqa: BLE001 — 失败落到任务状态，不炸服务
         t["status"] = "failed"
@@ -142,6 +147,12 @@ class TaskIn(BaseModel):
     duration_s: float | None = None  # 视频总时长（秒），缺省用配置值
 
 
+class AuditIn(BaseModel):
+    video: str                       # 本地路径或 http(s) URL
+    prompt: str                      # 用户原始请求（验收标准来源）
+    config: str | None = None
+
+
 # ---------- 接口 ----------
 
 @app.post("/tasks", status_code=202)
@@ -152,8 +163,9 @@ def submit(task: TaskIn, authorization: str | None = Header(default=None)) -> di
     task_id = time.strftime("t%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:6]
     run_dir = str(RUNS_DIR / task_id)
     os.makedirs(run_dir, exist_ok=True)
-    t = {"id": task_id, "status": "queued", "prompt": task.prompt,
-         "config": task.config, "duration_s": task.duration_s,
+    t = {"id": task_id, "type": "generate", "status": "queued",
+         "prompt": task.prompt, "config": task.config,
+         "duration_s": task.duration_s,
          "run_dir": run_dir, "error": None,
          "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
          "finished_at": None}
@@ -162,6 +174,45 @@ def submit(task: TaskIn, authorization: str | None = Header(default=None)) -> di
     _save_meta(t)
     _enqueue(task_id)
     return {"task_id": task_id, "status": "running",
+            "detail": f"GET /tasks/{task_id} 查询进度"}
+
+
+@app.post("/audit", status_code=202)
+def audit_video(task: AuditIn, authorization: str | None = Header(default=None)) -> dict:
+    """外部视频质检（平台对接）：双通道审查 + 优先级修复。"""
+    _auth(authorization)
+    if not task.prompt.strip():
+        raise HTTPException(400, "prompt 不能为空")
+    if not task.video.strip():
+        raise HTTPException(400, "video 不能为空")
+    task_id = time.strftime("t%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:6]
+    run_dir = str(RUNS_DIR / task_id)
+    os.makedirs(run_dir, exist_ok=True)
+
+    video = task.video
+    if video.startswith(("http://", "https://")):  # 平台传 URL：先下载
+        local = os.path.join(run_dir, "input_video")
+        try:
+            import requests as _rq
+            with _rq.get(video, stream=True, timeout=(10, 300)) as r:
+                r.raise_for_status()
+                with open(local, "wb") as f:
+                    for chunk in r.iter_content(1 << 20):
+                        f.write(chunk)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, f"视频下载失败：{e}")
+        video = local
+
+    t = {"id": task_id, "type": "audit", "status": "queued",
+         "prompt": task.prompt, "config": task.config, "video": video,
+         "run_dir": run_dir, "error": None,
+         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+         "finished_at": None}
+    with _lock:
+        _tasks[task_id] = t
+    _save_meta(t)
+    _enqueue(task_id)
+    return {"task_id": task_id, "type": "audit", "status": "running",
             "detail": f"GET /tasks/{task_id} 查询进度"}
 
 

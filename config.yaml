@@ -32,6 +32,10 @@ repairer:
   base_url: https://your-gateway.example.com/v1
   api_key: ${PHYSGEN_API_KEY}   # 密钥放 .env 或环境变量，绝不写进仓库
 
+# audit 模式（外部视频质检，physgen audit / POST /audit）
+audit:
+  background_check: true   # 通道②：全画面物理巡检（背景物体间冲突/悬浮/穿模）；关掉只做通道①验收核对
+
 # 物理审查阈值（超过即判定异常）
 thresholds:
   dim_error_pct: 15.0       # 尺寸误差百分比
