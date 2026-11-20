@@ -106,7 +106,8 @@ def _execute(task_id: str, resume: bool) -> None:
         cfg = load_config(t["config"])
         if t.get("type") == "audit":
             from physgen.orchestrator.audit_only import AuditPipeline
-            AuditPipeline(cfg, t["run_dir"]).run(t["video"], t["prompt"])
+            AuditPipeline(cfg, t["run_dir"]).run(
+                t["video"], t["prompt"], strict=bool(t.get("strict")))
         else:
             from physgen.orchestrator import Pipeline
             pipeline = Pipeline(cfg, t["run_dir"])
@@ -150,6 +151,7 @@ class TaskIn(BaseModel):
 class AuditIn(BaseModel):
     video: str                       # 本地路径或 http(s) URL
     prompt: str                      # 用户原始请求（验收标准来源）
+    strict: bool = False             # 本地模拟出物理真值（轨迹/落地时长纳入验收）
     config: str | None = None
 
 
@@ -205,6 +207,7 @@ def audit_video(task: AuditIn, authorization: str | None = Header(default=None))
 
     t = {"id": task_id, "type": "audit", "status": "queued",
          "prompt": task.prompt, "config": task.config, "video": video,
+         "strict": task.strict,
          "run_dir": run_dir, "error": None,
          "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
          "finished_at": None}

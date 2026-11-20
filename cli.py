@@ -65,10 +65,13 @@ def audit(video: str,
           prompt: str = typer.Option(..., "--prompt", "-p",
                                      help="用户原始请求（验收标准来源）"),
           config: str = typer.Option(None, "--config", "-c"),
-          out: str = typer.Option(None, "--out", "-o", help="运行目录")):
+          out: str = typer.Option(None, "--out", "-o", help="运行目录"),
+          strict: bool = typer.Option(
+              False, "--strict",
+              help="本地模拟出物理真值（轨迹/落地时长纳入验收，无 API 费用）")):
     """外部视频质检（平台对接模式）：双通道审查 + 优先级修复。
 
-    通道①：画面 vs 请求解析出的期望清单（验收标准）
+    通道①：画面 vs 请求解析出的期望清单（--strict 时升级为模拟真值基审查）
     通道②：全画面物理一致性巡检（config.audit.background_check 开关）
     video 支持 mp4 或帧序列目录（frame_*.png）。
     """
@@ -76,9 +79,10 @@ def audit(video: str,
     run_dir = out or os.path.join("runs", time.strftime("audit_%Y%m%d_%H%M%S"))
     from physgen.orchestrator.audit_only import AuditPipeline
     console.print(Panel(f"视频: {video}\n请求: {prompt}\n输出目录: {run_dir}\n"
+                        f"strict: {'开（本地模拟出真值）' if strict else '关'}\n"
                         f"通道②背景巡检: {'开' if cfg.audit.background_check else '关'}",
                         title="PhysGen audit"))
-    report_path = AuditPipeline(cfg, run_dir).run(video, prompt)
+    report_path = AuditPipeline(cfg, run_dir).run(video, prompt, strict=strict)
     console.print(f"[green]完成[/green] 审查报告: {report_path}")
 
 

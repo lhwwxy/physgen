@@ -25,14 +25,22 @@ from ..auditor.base import PhysicsAuditor
 from ..config import AppConfig
 from ..planner.base import Planner
 from ..repairer.base import Repairer
+from ..simulator.base import Simulator
 from ..simulator.mock import frames_to_gif, frames_to_video
 from ..types import (AuditReport, SimResult, UserRequest, VideoClip)
-from .providers import create_auditor, create_planner, create_repairer
+from .providers import (create_auditor, create_planner, create_repairer,
+                        create_simulator)
 from .report import render_report
 
 
 class AuditPipeline:
-    """外部视频质检：双通道审查 + 优先级修复。"""
+    """外部视频质检：双通道审查 + 优先级修复。
+
+    strict=False（默认）：通道① 参照源 = LLM 从请求解析的期望清单（纯语义）。
+    strict=True：先在本地用模拟器（Genesis/mock）按请求模拟一遍拿物理真值，
+    通道① 升级为 GT 基审查——轨迹形状、落地时长、重量感等数值期望纳入验收，
+    模拟首帧作为构图参照（仅参照位置关系，画风差异不判异常）。
+    """
 
     def __init__(self, cfg: AppConfig, run_dir: str):
         self.cfg = cfg
@@ -80,8 +88,8 @@ class AuditPipeline:
 
     # ---------- 主流程 ----------
 
-    def run(self, video: str, prompt: str) -> str:
-        """返回审查报告路径。"""
+    def run(self, video: str, prompt: str, strict: bool = False) -> str:
+        """返回审查报告路径。strict=True 时先本地模拟出物理真值。"""
         clip = self._load_clip(video)
         spec = self.planner.plan(UserRequest(text=prompt))
         if hasattr(self.auditor, "spec"):
@@ -91,13 +99,23 @@ class AuditPipeline:
         # 修复器需要的 SimResult 桩：audit 模式无模拟，提供首帧引用即可
         sim = SimResult(segment_index=0, first_frame_path=clip.frame_paths[0],
                         fps=clip.fps, n_frames=len(clip.frame_paths), gt={})
+        lane1_fn = self.auditor.audit_expectations
+
+        if strict:  # 本地模拟出 GT：数值物理期望纳入通道①（无 API 费用）
+            simulator: Simulator = create_simulator(self.cfg)
+            simulator.run_dir = self.run_dir
+            simulator.build(spec)
+            sim = simulator.simulate_segment(0)
+            lane1_fn = self.auditor.audit  # GT 基审查（轨迹/落地时长/重量感）
+            print(f"[audit] strict：模拟器({self.cfg.simulator.provider})已出物理真值")
 
         bg_on = self.cfg.audit.background_check
-        lane1 = self.auditor.audit_expectations(clip, spec)
+        lane1 = lane1_fn(clip, sim)
         lane2 = (self.auditor.audit_background(clip, spec)
                  if bg_on else AuditReport(0, [], []))
         repair_log = [
-            f"[通道①验收核对] {len(lane1.anomalies)} 处异常",
+            f"[通道①验收核对] 参照源={'模拟物理真值(GT)' if strict else '请求解析期望'}，"
+            f"{len(lane1.anomalies)} 处异常",
             f"[通道②物理巡检] {'启用' if bg_on else '关闭'}，"
             f"{len(lane2.anomalies)} 处异常",
         ]
@@ -119,7 +137,7 @@ class AuditPipeline:
             clip = self.repairer.repair_frames(
                 clip, sim, targets,
                 os.path.join(self.run_dir, f"frame_fix_{rounds}"))
-            lane1 = self.auditor.audit_expectations(clip, spec)
+            lane1 = lane1_fn(clip, sim)
             lane2 = (self.auditor.audit_background(clip, spec)
                      if bg_on else AuditReport(0, [], []))
             repair_log.append(

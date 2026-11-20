@@ -8,8 +8,8 @@ from PIL import Image
 from physgen.config import (AppConfig, AuditCfg, Budget, MockCfg, ProviderCfg,
                             Thresholds, VideoCfg)
 from physgen.types import (Anomaly, AuditReport, CheckItem, GroundSpec,
-                           SceneEvent, SceneObject, SceneSpec, SegmentSpec,
-                           UserRequest)
+                           ObjectFrameState, SceneEvent, SceneObject,
+                           SceneSpec, SegmentSpec, SimResult, UserRequest)
 from physgen.auditor.base import PhysicsAuditor
 from physgen.repairer.base import Repairer
 from physgen.orchestrator.audit_only import AuditPipeline
@@ -33,12 +33,20 @@ class FakeAuditor(PhysicsAuditor):
     """脚本化双通道（按调用次序）：
     lane1: 第 1 次调用报帧 1，之后通过
     lane2: 第 1 次（初始巡检）通过；第 2 次（首轮修复后复审）报帧 3；之后通过
+    strict 模式下 lane1 改走 audit()（GT 基），计数在 gt_calls。
     """
 
     def __init__(self):
         self.lane1_calls = 0
         self.lane2_calls = 0
+        self.gt_calls = 0
         self.background_enabled = True
+
+    def audit(self, clip, sim, fix_factor=1.0):
+        """GT 基审查（strict 模式的通道①）。"""
+        self.gt_calls += 1
+        assert sim.gt, "strict 模式下 sim 必须带物理真值"
+        return self._report("gt_expectations", 1 if self.gt_calls == 1 else None)
 
     @staticmethod
     def _report(metric, frame):
@@ -134,6 +142,68 @@ def test_background_check_off(tmp_path):
     assert ap.auditor.lane2_calls == 0      # 通道② 未启用
     assert repairer.calls == [[1]]          # 只修通道① 的帧
     assert not any("②" in line for line in [])  # 无通道② 修复记录
+
+
+class FakeSimulator:
+    """记录 build/simulate 调用，返回带 GT 的 SimResult（帧目录输入）。"""
+
+    def __init__(self, first_frame_path: str):
+        self.built = False
+        self.ran = 0
+        self.run_dir = None
+        self._first = first_frame_path
+
+    def build(self, spec):
+        self.built = True
+
+    def simulate_segment(self, index: int) -> SimResult:
+        self.ran += 1
+        return SimResult(
+            segment_index=index, first_frame_path=self._first, fps=6,
+            n_frames=5,
+            gt={"stone": [ObjectFrameState("stone", (1, 0.5, 1), (0, 0, 0),
+                                           (2, 2, 1))] * 5})
+
+
+def test_strict_uses_local_simulation_gt(tmp_path):
+    """strict=True：先本地模拟出真值，通道①走 GT 基审查；sim 传给修复器。"""
+    frames_dir = _make_frames(tmp_path)
+    run_dir = str(tmp_path / "run")
+    ap = AuditPipeline(_cfg(background_check=True), run_dir)
+    ap.planner = FakePlanner()
+    ap.auditor = auditor = FakeAuditor()
+    repairer = SpyRepairer()
+    ap.repairer = repairer
+
+    import physgen.orchestrator.audit_only as ao
+    fake_sim = FakeSimulator(f"{frames_dir}/frame_0000.png")
+    monkey = __import__("pytest").MonkeyPatch()
+    monkey.setattr(ao, "create_simulator", lambda cfg: fake_sim)
+    try:
+        ap.run(frames_dir, "一块10×10米的土地上放一个2×2×1米的石块", strict=True)
+    finally:
+        monkey.undo()
+
+    assert fake_sim.built and fake_sim.ran == 1        # 模拟只跑一次
+    assert auditor.gt_calls == 3 and auditor.lane1_calls == 0  # 通道①走 GT 基
+    # 通道①(GT) 报帧 1 先修；通道② 巡检报帧 3 后修（背景巡检仍开启）
+    assert repairer.calls == [[1], [3]]
+
+
+def test_non_strict_skips_simulation(tmp_path):
+    """默认模式：完全不触碰模拟器，通道①走期望清单审查。"""
+    frames_dir = _make_frames(tmp_path)
+    run_dir = str(tmp_path / "run")
+    ap = AuditPipeline(_cfg(background_check=False), run_dir)
+    ap.planner = FakePlanner()
+    ap.auditor = auditor = FakeAuditor()
+    ap.repairer = SpyRepairer()
+
+    ap.run(frames_dir, "测试请求", strict=False)
+
+    assert auditor.gt_calls == 0          # 没走 audit()（GT 基）
+    assert auditor.lane1_calls == 2       # 走的是期望清单审查
+    assert auditor.lane2_calls == 0
 
 
 def test_missing_video_raises(tmp_path):
