@@ -24,10 +24,13 @@ real = [
     "torch>=2.0",
     "imageio[ffmpeg]>=2.30",
 ]
-dev = ["pytest>=7.0"]
+# HTTP 服务化包装（供外部平台集成）：pip install -e ".[server]"
+server = ["fastapi>=0.110", "uvicorn>=0.29"]
+dev = ["pytest>=7.0", "httpx>=0.27"]
 
 [project.scripts]
 physgen = "cli:main"
+physgen-server = "server:main"
 
 [tool.setuptools]
 packages = ["physgen", "physgen.planner", "physgen.simulator", "physgen.generator",

@@ -97,6 +97,37 @@ physgen report runs/demo
 
 任一真实后端不可用时自动降级 Mock，流水线不中断。
 
+## 作为服务集成到其他平台
+
+流水线核心零改动，附 HTTP 服务化包装（异步任务模式，适合视频制作平台等外部系统对接）：
+
+```bash
+pip install -e ".[server]"
+PHYSGEN_SERVER_TOKEN=your-secret uvicorn server:app --port 8000   # 或 physgen-server
+```
+
+| 接口 | 说明 |
+|---|---|
+| `POST /tasks` | 提交需求（prompt/config/duration_s），立即返回 task_id |
+| `GET /tasks/{id}` | 状态与进度（来自 checkpoint：规划/段进度/全局审查） |
+| `POST /tasks/{id}/resume` | 失败或中断的任务断点续跑（不重复调用已完成的生成步骤） |
+| `GET /tasks/{id}/result` | 产物清单（成片/各段视频/报告） |
+| `GET /tasks/{id}/report` | 审查报告 HTML |
+| `GET /tasks/{id}/files?path=...` | 下载任意产物文件（防路径穿越） |
+
+Docker 部署（config.yaml 与 .env 由挂载提供）：
+
+```bash
+docker build -t physgen .          # 轻量镜像；--build-arg EXTRAS="server,real" 含 GPU 物理依赖
+docker run -d -p 8000:8000 \
+  -v $(pwd)/config.yaml:/app/config.yaml:ro \
+  -v $(pwd)/.env:/app/.env:ro \
+  -v $(pwd)/runs:/app/runs \
+  -e PHYSGEN_SERVER_TOKEN=your-secret physgen
+```
+
+> 平台集成提示：单次全链路分钟级耗时与 API 费用，请配合任务队列与预算参数（`budget`）使用；输入内容审核由集成方负责。
+
 ## 测试
 
 ```bash
